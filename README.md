@@ -12,6 +12,10 @@ Linked-Out is a powerful API service that allows users to analyze, search, and i
 - 🧠 Groq-powered RAG for intelligent responses
 - 🔄 Real-time content processing
 
+## Architecture
+![linked-out-complete-arch](https://github.com/user-attachments/assets/eac1bb74-4d61-4f7c-b33f-b4c5eb1e003e)
+![linked-out-backend-arch](https://github.com/user-attachments/assets/ebfd3f2c-f123-4a62-9b2e-02ef9d6ec94c)
+
 ## Prerequisites
 
 - Docker and Docker Compose
