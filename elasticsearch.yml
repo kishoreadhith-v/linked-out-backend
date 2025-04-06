@@ -1,0 +1,19 @@
+cluster.name: "linked-out-cluster"
+network.host: 0.0.0.0
+
+# Minimum memory settings
+bootstrap.memory_lock: true
+discovery.type: single-node
+
+# Security settings
+xpack.security.enabled: true
+xpack.security.transport.ssl.enabled: true
+
+# Path settings
+path.data: /usr/share/elasticsearch/data
+path.logs: /usr/share/elasticsearch/logs
+
+# Resource limits
+indices.memory.index_buffer_size: 10%
+indices.queries.cache.size: 5%
+indices.fielddata.cache.size: 20%
