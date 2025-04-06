@@ -1,0 +1,92 @@
+digraph LinkedOut {
+    rankdir=TB;
+    node [shape=box, style=filled, fillcolor=lightblue, fontname="Arial"];
+    edge [fontname="Arial", fontsize=10];
+
+    subgraph cluster_external {
+        label="External Services";
+        style=filled;
+        fillcolor=lightyellow;
+        
+        groq [label="Groq API\n(LLM Service)"];
+        elasticsearch [label="Elasticsearch\n(Search & Storage)"];
+        websites [label="External Websites\n(Content Source)"];
+        jina [label="Jina AI\n(Embedding Model)"];
+    }
+
+    subgraph cluster_api {
+        label="API Layer";
+        style=filled;
+        fillcolor=lightgrey;
+        
+        auth [label="Authentication\nEndpoints\n(/api/register\n/api/login)"];
+        url_mgmt [label="URL Management\n(/api/urls)"];
+        search_api [label="Search API\n(/api/search)"];
+        chat_api [label="Chat API\n(/api/chat)"];
+    }
+
+    subgraph cluster_core {
+        label="Core Services";
+        style=filled;
+        fillcolor=lightgreen;
+        
+        scraper [label="Web Scraper\n(BeautifulSoup)"];
+        jwt_service [label="JWT Service"];
+        search_service [label="Search Service\n(Fuzzy Search)"];
+        rag_service [label="RAG Service\n(Content Processing)"];
+        embedding_service [label="Embedding Service\n(Text Vectorization)"];
+        chunk_service [label="Chunk Service\n(Text Splitting)"];
+    }
+
+    subgraph cluster_vector {
+        label="Vector Store";
+        style=filled;
+        fillcolor=lightcyan;
+        
+        chromadb [label="ChromaDB\n(Vector Database)"];
+        vector_index [label="Vector Collection\n(Embeddings)"];
+    }
+
+    subgraph cluster_data {
+        label="Data Layer";
+        style=filled;
+        fillcolor=lightpink;
+        
+        users [label="Users Index"];
+        webpages [label="Webpages Index"];
+    }
+
+    # External connections
+    websites -> scraper [label="HTTP"];
+    groq -> rag_service [label="API Calls"];
+    elasticsearch -> {users webpages} [label="Stores"];
+    jina -> embedding_service [label="Embeddings API"];
+
+    # API to Core
+    auth -> jwt_service [label="Validates"];
+    url_mgmt -> scraper [label="Triggers"];
+    search_api -> search_service [label="Uses"];
+    chat_api -> rag_service [label="Processes"];
+
+    # Core to Vector Store
+    scraper -> chunk_service [label="Raw Text"];
+    chunk_service -> embedding_service [label="Text Chunks"];
+    embedding_service -> vector_index [label="Vectors"];
+    chromadb -> vector_index [label="Manages"];
+
+    # Core to Data
+    scraper -> webpages [label="Stores Content"];
+    search_service -> {users webpages} [label="Queries"];
+    rag_service -> webpages [label="Retrieves"];
+    jwt_service -> users [label="Validates"];
+
+    # RAG Flow
+    rag_service -> embedding_service [label="Query Embedding"];
+    vector_index -> rag_service [label="Similar Chunks"];
+    webpages -> rag_service [label="Context"];
+
+    # Data flow
+    webpages -> search_service [label="Provides Data"];
+    webpages -> chunk_service [label="Content"];
+    users -> auth [label="Auth Data"];
+} 

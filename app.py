@@ -442,25 +442,34 @@ def get_url_content(url, user_id):
 
 def format_content_for_llm(content, query):
     """Format the content for the LLM prompt"""
-    return f"""You are a direct and helpful assistant that answers questions about web content. Follow these rules strictly:
+    return f"""STRICT RESPONSE FORMAT:
 
-1. ONLY answer questions that can be directly answered using the provided content.
-2. If the question is not related to the content, respond with: "I can only answer questions about the content of this webpage, which is about [brief topic]. Your question seems unrelated to this content."
-3. If the question is related but there isn't enough information, respond with: "While this page is about [brief topic], I don't have enough information in the content to fully answer your question about [specific aspect]. You might want to:
-   - Check other sections of the website
-   - Search for [specific terms] online
-   - Consult [relevant sources]"
-4. Speak directly to the user in a clear, professional tone.
-5. Never mention that you are an AI or assistant - just provide the answer.
-6. Don't apologize or use phrases like "I think" or "I believe" - be confident in your responses when they're based on the content.
+IF QUESTION IS UNRELATED:
+This webpage is about [topic]. Your question about [X] is unrelated to this content.
 
-Here is the content to work with:
+IF INFORMATION IS INSUFFICIENT:
+This webpage covers [topic], but doesn't contain enough information about [X]. Consider:
+- Checking other sections of the website
+- Searching for [specific terms] online
+- Consulting [relevant sources]
 
+IF QUESTION CAN BE ANSWERED:
+[Direct answer in clear, numbered steps or concise paragraph]
+
+WEBPAGE CONTENT:
 Title: {content['title']}
 URL: {content['url']}
 Content: {content['content']}
 
-User Question: {query}"""
+QUESTION: {query}
+
+REQUIREMENTS:
+1. Start response with exact answer
+2. No explanations of thinking
+3. No XML tags
+4. No blank lines
+5. No "I" statements
+6. No "Let me" phrases"""
 
 @app.route('/api/chat', methods=['POST'])
 @token_required
@@ -488,24 +497,68 @@ def chat(current_user):
         prompt = format_content_for_llm(content, query)
         
         # Get response from Groq
-        response = groq_client.chat.completions.create(
-            model="mixtral-8x7b-32768",
-            messages=[
-                {"role": "system", "content": "You are a direct and helpful assistant that answers questions about web content. Always speak directly to the user and only answer questions based on the provided content."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.3,  # Lower temperature for more focused responses
-            max_tokens=1024
-        )
+        try:
+            response = groq_client.chat.completions.create(
+                model="qwen-qwq-32b",
+                messages=[
+                    {
+                        "role": "system", 
+                        "content": "You are a direct response system. Output only the final answer without any explanation, internal monologue, or XML tags. Never use <think> or similar tags."
+                    },
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.1,
+                max_tokens=1024
+            )
 
-        return jsonify({
-            "response": response.choices[0].message.content,
-            "url": url,
-            "title": content['title']
-        })
+            # Get the raw response
+            raw_response = response.choices[0].message.content.strip()
+            
+            # Clean up the response by removing internal monologue and XML tags
+            def clean_response(text):
+                # Remove <think> blocks
+                text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+                # Remove any XML-like tags
+                text = re.sub(r'<[^>]+>', '', text)
+                # Remove phrases indicating thinking
+                text = re.sub(r'(?i)(let me|okay|first|looking|scanning|checking|i need to|i should)', '', text)
+                # Remove multiple newlines
+                text = re.sub(r'\n\s*\n', '\n', text)
+                # Remove leading/trailing whitespace
+                text = text.strip()
+                return text
+
+            cleaned_response = clean_response(raw_response)
+            
+            # If the cleaned response is empty, use a fallback
+            if not cleaned_response:
+                cleaned_response = "This webpage is about GroqCloud's features and API documentation. Your question appears to be unrelated to this content."
+
+            return jsonify({
+                "response": cleaned_response,
+                "url": url,
+                "title": content['title']
+            })
+        except Exception as groq_error:
+            logger.error(f"Groq API error: {str(groq_error)}")
+            if "rate limit" in str(groq_error).lower():
+                return jsonify({"error": "Rate limit exceeded. Please try again later."}), 429
+            elif "auth" in str(groq_error).lower():
+                return jsonify({"error": "Invalid Groq API key or authentication error"}), 401
+            elif "model" in str(groq_error).lower():
+                return jsonify({"error": "Model is currently unavailable. Please try again later."}), 503
+            else:
+                return jsonify({
+                    "error": "Failed to generate response",
+                    "details": str(groq_error)
+                }), 500
+
     except Exception as e:
-        logger.error(f"Error in chat: {str(e)}")
-        return jsonify({"error": "Failed to generate response"}), 500
+        logger.error(f"Error in chat endpoint: {str(e)}")
+        return jsonify({
+            "error": "Failed to process request",
+            "details": str(e)
+        }), 500
 
 if __name__ == '__main__':
     if not es:
