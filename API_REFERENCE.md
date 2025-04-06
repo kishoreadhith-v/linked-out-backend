@@ -174,7 +174,7 @@ Delete a specific URL from the system.
 GET /api/search?q={query}
 ```
 
-Search across all URLs for the authenticated user.
+Search across all URLs for the authenticated user. Supports fuzzy matching for both title and content.
 
 **Headers:**
 

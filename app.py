@@ -12,10 +12,6 @@ from functools import wraps
 from werkzeug.security import generate_password_hash, check_password_hash
 import re
 from groq import Groq
-import chromadb
-from chromadb.config import Settings
-from transformers import AutoModel
-import numpy as np
 
 # Load environment variables from .env file
 load_dotenv()
@@ -45,151 +41,6 @@ if not GROQ_API_KEY:
     groq_client = None
 else:
     groq_client = Groq(api_key=GROQ_API_KEY)
-
-# Initialize ChromaDB
-chroma_client = chromadb.PersistentClient(path="chroma_db")
-collection = chroma_client.get_or_create_collection(
-    name="webpage_embeddings",
-    metadata={"hnsw:space": "cosine"}
-)
-
-# Initialize embedding model
-embedding_model = AutoModel.from_pretrained('jinaai/jina-embeddings-v2-base-en', trust_remote_code=True)
-
-def chunk_text(text, chunk_size=500, overlap=50):
-    """Split text into overlapping chunks"""
-    words = text.split()
-    chunks = []
-    for i in range(0, len(words), chunk_size - overlap):
-        chunk = ' '.join(words[i:i + chunk_size])
-        chunks.append(chunk)
-    return chunks
-
-def get_embeddings(texts):
-    """Get embeddings using Jina embeddings model"""
-    try:
-        embeddings = embedding_model.encode(texts).tolist()
-        return embeddings
-    except Exception as e:
-        logger.error(f"Error getting embeddings: {str(e)}")
-        raise
-
-def scrape_url(url):
-    try:
-        logger.info(f"Scraping URL: {url}")
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()  # Raise an exception for bad status codes
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Remove script and style elements
-        for script in soup(["script", "style"]):
-            script.decompose()
-        
-        # Get title
-        title = soup.title.string if soup.title else "No title"
-        logger.info(f"Found title: {title}")
-        
-        # Find favicon
-        favicon = None
-        favicon_link = soup.find('link', rel=lambda r: r and ('icon' in r.lower() or 'shortcut' in r.lower()))
-        if favicon_link and favicon_link.get('href'):
-            favicon = urljoin(url, favicon_link['href'])
-        else:
-            # Try default favicon location
-            default_favicon = urljoin(url, '/favicon.ico')
-            try:
-                favicon_response = requests.head(default_favicon, timeout=5)
-                if favicon_response.status_code == 200:
-                    favicon = default_favicon
-            except:
-                pass
-
-        # Get main content
-        main_content = soup.find('main') or soup.find('article') or soup.find('div', class_='content')
-        if main_content:
-            text = main_content.get_text(separator=' ', strip=True)
-        else:
-            text = soup.get_text(separator=' ', strip=True)
-            
-        logger.info(f"Successfully scraped {len(text)} characters of content")
-        return {
-            "title": title,
-            "content": text,
-            "favicon": favicon
-        }
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error scraping URL {url}: {str(e)}")
-        return None
-    except Exception as e:
-        logger.error(f"Unexpected error scraping URL {url}: {str(e)}")
-        return None
-
-def store_embeddings(url, content, user_id):
-    """Store embeddings for a webpage in ChromaDB"""
-    try:
-        logger.info(f"Storing embeddings for URL: {url}")
-        
-        # Split content into chunks
-        chunks = chunk_text(content)
-        logger.info(f"Split content into {len(chunks)} chunks")
-        
-        if not chunks:
-            logger.error("No content chunks generated")
-            return False
-            
-        # Generate embeddings for chunks
-        embeddings = get_embeddings(chunks)
-        logger.info(f"Successfully generated {len(embeddings)} embeddings")
-        
-        if not embeddings:
-            logger.error("No embeddings generated")
-            return False
-            
-        # Prepare metadata
-        metadatas = [{"url": url, "user_id": user_id, "chunk_index": i} 
-                    for i in range(len(chunks))]
-        
-        # Store in ChromaDB
-        collection.add(
-            embeddings=embeddings,
-            documents=chunks,
-            metadatas=metadatas,
-            ids=[f"{url}_{i}" for i in range(len(chunks))]
-        )
-        logger.info("Successfully stored embeddings in ChromaDB")
-        return True
-    except Exception as e:
-        logger.error(f"Error storing embeddings: {str(e)}")
-        return False
-
-def get_relevant_chunks(url, query, user_id, top_k=3):
-    """Get relevant chunks from ChromaDB based on query"""
-    try:
-        logger.info(f"Getting relevant chunks for URL: {url}, Query: {query}")
-        
-        # Get query embedding
-        query_embedding = get_embeddings([query])[0]
-        logger.info("Successfully generated query embedding")
-        
-        # Search in ChromaDB
-        results = collection.query(
-            query_embeddings=[query_embedding],
-            where={"$and": [
-                {"url": {"$eq": url}},
-                {"user_id": {"$eq": user_id}}
-            ]},
-            n_results=top_k
-        )
-        
-        if not results or not results['documents'] or not results['documents'][0]:
-            logger.warning(f"No results found for URL: {url}, Query: {query}")
-            return None
-            
-        logger.info(f"Found {len(results['documents'][0])} relevant chunks")
-        return results['documents'][0]
-    except Exception as e:
-        logger.error(f"Error getting relevant chunks: {str(e)}")
-        return None
 
 def token_required(f):
     @wraps(f)
@@ -367,6 +218,42 @@ def login():
         logger.error(f"Error during login: {str(e)}")
         return jsonify({'error': 'Login failed'}), 500
 
+def scrape_url(url):
+    try:
+        response = requests.get(url)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Remove script and style elements
+        for script in soup(["script", "style"]):
+            script.decompose()
+        
+        # Get title
+        title = soup.title.string if soup.title else "No title"
+        
+        # Find favicon
+        favicon = None
+        favicon_link = soup.find('link', rel=lambda r: r and ('icon' in r.lower() or 'shortcut' in r.lower()))
+        if favicon_link and favicon_link.get('href'):
+            favicon = urljoin(url, favicon_link['href'])
+        else:
+            # Try default favicon location
+            default_favicon = urljoin(url, '/favicon.ico')
+            try:
+                favicon_response = requests.head(default_favicon)
+                if favicon_response.status_code == 200:
+                    favicon = default_favicon
+            except:
+                pass
+
+        text = soup.get_text(separator=' ', strip=True)
+        return {
+            "title": title,
+            "content": text,
+            "favicon": favicon
+        }
+    except Exception as e:
+        return None
+
 @app.route('/api/urls', methods=['POST'])
 @token_required
 def add_url(current_user):
@@ -383,7 +270,6 @@ def add_url(current_user):
         return jsonify({"error": "Failed to scrape URL"}), 400
 
     try:
-        # Store in Elasticsearch
         es.index(index="webpages", body={
             "url": url,
             "title": scraped_data["title"],
@@ -392,11 +278,6 @@ def add_url(current_user):
             "timestamp": datetime.utcnow().isoformat(),
             "user_id": current_user['_id']
         })
-
-        # Store embeddings in ChromaDB
-        if not store_embeddings(url, scraped_data["content"], current_user['_id']):
-            logger.warning(f"Failed to store embeddings for URL: {url}")
-
         return jsonify({"message": "URL added successfully"})
     except Exception as e:
         logger.error(f"Error adding URL: {str(e)}")
@@ -559,19 +440,27 @@ def get_url_content(url, user_id):
         logger.error(f"Error retrieving URL content: {str(e)}")
         return None
 
-def format_context_for_llm(chunks, query):
-    """Format the context for the LLM prompt following Groq's RAG pattern"""
-    matched_info = ' '.join(chunks)
-    context = f"Information: {matched_info}"
-    
-    system_prompt = f"""
-Instructions:
-- Be helpful and answer questions concisely. If you don't know the answer, say 'I don't know'
-- Utilize the context provided for accurate and specific information.
-- Incorporate your preexisting knowledge to enhance the depth and relevance of your response.
-Context: {context}
-"""
-    return system_prompt
+def format_content_for_llm(content, query):
+    """Format the content for the LLM prompt"""
+    return f"""You are a direct and helpful assistant that answers questions about web content. Follow these rules strictly:
+
+1. ONLY answer questions that can be directly answered using the provided content.
+2. If the question is not related to the content, respond with: "I can only answer questions about the content of this webpage, which is about [brief topic]. Your question seems unrelated to this content."
+3. If the question is related but there isn't enough information, respond with: "While this page is about [brief topic], I don't have enough information in the content to fully answer your question about [specific aspect]. You might want to:
+   - Check other sections of the website
+   - Search for [specific terms] online
+   - Consult [relevant sources]"
+4. Speak directly to the user in a clear, professional tone.
+5. Never mention that you are an AI or assistant - just provide the answer.
+6. Don't apologize or use phrases like "I think" or "I believe" - be confident in your responses when they're based on the content.
+
+Here is the content to work with:
+
+Title: {content['title']}
+URL: {content['url']}
+Content: {content['content']}
+
+User Question: {query}"""
 
 @app.route('/api/chat', methods=['POST'])
 @token_required
@@ -592,31 +481,20 @@ def chat(current_user):
     # Get the content for the URL
     content = get_url_content(url, current_user['_id'])
     if not content:
-        return jsonify({
-            "error": "URL not found. Please add the URL first using the /api/urls endpoint.",
-            "details": "The URL needs to be scraped and indexed before you can chat with it."
-        }), 404
+        return jsonify({"error": "URL not found or not accessible"}), 404
 
     try:
-        # Get relevant chunks using semantic search
-        relevant_chunks = get_relevant_chunks(url, query, current_user['_id'])
-        if not relevant_chunks:
-            return jsonify({
-                "error": "No relevant content found for the query",
-                "details": "Try rephrasing your question or adding more context. If this persists, try re-adding the URL."
-            }), 404
-
-        # Format the context for the LLM
-        system_prompt = format_context_for_llm(relevant_chunks, query)
+        # Format the content for the LLM
+        prompt = format_content_for_llm(content, query)
         
-        # Get response from Groq using their recommended format
+        # Get response from Groq
         response = groq_client.chat.completions.create(
-            model="qwen-qwq-32b",  # Using Alibaba's Qwen model
+            model="mixtral-8x7b-32768",
             messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": query}
+                {"role": "system", "content": "You are a direct and helpful assistant that answers questions about web content. Always speak directly to the user and only answer questions based on the provided content."},
+                {"role": "user", "content": prompt}
             ],
-            temperature=0.7,
+            temperature=0.3,  # Lower temperature for more focused responses
             max_tokens=1024
         )
 
@@ -627,10 +505,7 @@ def chat(current_user):
         })
     except Exception as e:
         logger.error(f"Error in chat: {str(e)}")
-        return jsonify({
-            "error": "Failed to generate response",
-            "details": f"Error code: {getattr(e, 'status_code', 'Unknown')} - {str(e)}"
-        }), 500
+        return jsonify({"error": "Failed to generate response"}), 500
 
 if __name__ == '__main__':
     if not es:
