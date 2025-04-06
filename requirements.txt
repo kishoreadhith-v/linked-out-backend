@@ -1,0 +1,11 @@
+flask==2.3.3
+werkzeug==2.3.7
+elasticsearch==8.17.1
+requests==2.31.0
+beautifulsoup4==4.12.2
+python-dotenv==1.0.0
+PyJWT==2.3.0
+groq==0.22.0
+chromadb==0.4.22
+numpy==1.26.4
+transformers==4.38.2
