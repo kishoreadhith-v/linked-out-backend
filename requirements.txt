@@ -6,4 +6,3 @@ beautifulsoup4==4.12.2
 python-dotenv==1.0.0
 PyJWT==2.3.0
 groq==0.4.2
-gunicorn==21.2.0
