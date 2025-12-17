@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, render_template, jsonify
 from elasticsearch import Elasticsearch
 import requests
 from bs4 import BeautifulSoup
@@ -7,11 +7,6 @@ from dotenv import load_dotenv
 import logging
 from datetime import datetime
 from urllib.parse import urljoin
-import jwt
-from functools import wraps
-from werkzeug.security import generate_password_hash, check_password_hash
-import re
-from groq import Groq
 
 # Load environment variables from .env file
 load_dotenv()
@@ -23,51 +18,12 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 es = None
 
-# JWT Configuration
-app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY', 'your-secret-key')
-app.config['JWT_ACCESS_TOKEN_EXPIRES'] = 86400  # 24 hours
-
 # Get Elasticsearch credentials from environment variables
 ELASTIC_PASSWORD = os.getenv('ELASTIC_PASSWORD')
 ELASTIC_CERT_PATH = os.getenv('ELASTIC_CERT_PATH')
 ELASTIC_HOST = os.getenv('ELASTIC_HOST', 'localhost')
 ELASTIC_PORT = os.getenv('ELASTIC_PORT', '9200')
 ELASTIC_USE_SSL = os.getenv('ELASTIC_USE_SSL', 'true').lower() == 'true'
-
-# Initialize Groq client
-GROQ_API_KEY = os.getenv('GROQ_API_KEY')
-if not GROQ_API_KEY:
-    logger.warning("GROQ_API_KEY not found in environment variables. Chat functionality will be disabled.")
-    groq_client = None
-else:
-    groq_client = Groq(api_key=GROQ_API_KEY)
-
-def token_required(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        token = None
-        if 'Authorization' in request.headers:
-            auth_header = request.headers['Authorization']
-            try:
-                token = auth_header.split(" ")[1]
-            except IndexError:
-                return jsonify({'error': 'Invalid token format'}), 401
-
-        if not token:
-            return jsonify({'error': 'Token is missing'}), 401
-
-        try:
-            data = jwt.decode(token, app.config['JWT_SECRET_KEY'], algorithms=["HS256"])
-            current_user = get_user_by_id(data['user_id'])
-            if not current_user:
-                return jsonify({'error': 'User not found'}), 401
-        except jwt.ExpiredSignatureError:
-            return jsonify({'error': 'Token has expired'}), 401
-        except jwt.InvalidTokenError:
-            return jsonify({'error': 'Invalid token'}), 401
-
-        return f(current_user, *args, **kwargs)
-    return decorated
 
 def create_elasticsearch_client():
     """Create Elasticsearch client with appropriate configuration"""
@@ -101,122 +57,55 @@ def create_elasticsearch_client():
 # Initialize Elasticsearch client
 es = create_elasticsearch_client()
 
-def get_user_by_id(user_id):
-    if not es:
-        return None
+if es:
     try:
-        result = es.get(index="users", id=user_id)
-        if result["found"]:
-            user_data = result["_source"]
-            user_data["_id"] = result["_id"]
-            return user_data
-    except Exception as e:
-        logger.error(f"Error getting user: {str(e)}")
-    return None
-
-def get_user_by_email(email):
-    if not es:
-        return None
-    try:
-        result = es.search(index="users", body={
-            "query": {
-                "term": {
-                    "email.keyword": email
+        if not es.indices.exists(index="webpages"):
+            es.indices.create(index="webpages", body={
+                "settings": {
+                    "analysis": {
+                        "analyzer": {
+                            "custom_analyzer": {
+                                "type": "custom",
+                                "tokenizer": "standard",
+                                "filter": ["lowercase", "custom_edge_ngram"]
+                            }
+                        },
+                        "filter": {
+                            "custom_edge_ngram": {
+                                "type": "edge_ngram",
+                                "min_gram": 2,
+                                "max_gram": 10
+                            }
+                        }
+                    }
+                },
+                "mappings": {
+                    "properties": {
+                        "url": {"type": "keyword"},
+                        "content": {
+                            "type": "text",
+                            "analyzer": "custom_analyzer",
+                            "search_analyzer": "standard"
+                        },
+                        "title": {
+                            "type": "text",
+                            "analyzer": "custom_analyzer",
+                            "search_analyzer": "standard",
+                            "fields": {
+                                "keyword": {
+                                    "type": "keyword"
+                                }
+                            }
+                        },
+                        "favicon": {"type": "keyword"},
+                        "timestamp": {"type": "date"}
+                    }
                 }
-            }
-        })
-        if result["hits"]["total"]["value"] > 0:
-            user_data = result["hits"]["hits"][0]["_source"]
-            user_data["_id"] = result["hits"]["hits"][0]["_id"]
-            return user_data
+            })
+            print("Created 'webpages' index with edge ngram analyzer")
     except Exception as e:
-        logger.error(f"Error getting user by email: {str(e)}")
-    return None
-
-@app.route('/api/register', methods=['POST'])
-def register():
-    if not es:
-        return jsonify({'error': 'Elasticsearch is not available'}), 503
-
-    data = request.get_json()
-    if not data:
-        return jsonify({'error': 'No data provided'}), 400
-
-    required_fields = ['username', 'email', 'password', 'confirm_password']
-    for field in required_fields:
-        if field not in data:
-            return jsonify({'error': f'{field} is required'}), 400
-
-    if data['password'] != data['confirm_password']:
-        return jsonify({'error': 'Passwords do not match'}), 400
-
-    # Validate email format
-    if not re.match(r"[^@]+@[^@]+\.[^@]+", data['email']):
-        return jsonify({'error': 'Invalid email format'}), 400
-
-    # Check if email already exists
-    existing_user = get_user_by_email(data['email'])
-    if existing_user:
-        return jsonify({'error': 'Email already registered'}), 400
-
-    try:
-        user_data = {
-            "username": data['username'],
-            "email": data['email'],
-            "password_hash": generate_password_hash(data['password']),
-            "created_at": datetime.utcnow().isoformat()
-        }
-
-        result = es.index(index="users", body=user_data)
-        logger.info(f"User registered successfully: {data['email']}")
-        return jsonify({
-            'message': 'User registered successfully',
-            'user_id': result['_id']
-        }), 201
-    except Exception as e:
-        logger.error(f"Error registering user: {str(e)}")
-        return jsonify({'error': 'Failed to register user'}), 500
-
-@app.route('/api/login', methods=['POST'])
-def login():
-    if not es:
-        return jsonify({'error': 'Elasticsearch is not available'}), 503
-
-    data = request.get_json()
-    if not data or 'email' not in data or 'password' not in data:
-        return jsonify({'error': 'Email and password are required'}), 400
-
-    try:
-        user = get_user_by_email(data['email'])
-        if not user:
-            logger.warning(f"Login attempt with non-existent email: {data['email']}")
-            return jsonify({'error': 'Invalid email or password'}), 401
-
-        if not check_password_hash(user['password_hash'], data['password']):
-            logger.warning(f"Failed login attempt for user: {data['email']}")
-            return jsonify({'error': 'Invalid email or password'}), 401
-
-        token = jwt.encode(
-            {
-                'user_id': user['_id'],
-                'exp': datetime.utcnow().timestamp() + app.config['JWT_ACCESS_TOKEN_EXPIRES']
-            },
-            app.config['JWT_SECRET_KEY'],
-            algorithm='HS256'
-        )
-
-        logger.info(f"User logged in successfully: {data['email']}")
-        return jsonify({
-            'token': token,
-            'user': {
-                'id': user['_id'],
-                'username': user['username'],
-                'email': user['email']
-            }
-        })
-    except Exception as e:
-        logger.error(f"Error during login: {str(e)}")
-        return jsonify({'error': 'Login failed'}), 500
+        print(f"Error creating index: {str(e)}")
+        es = None
 
 def scrape_url(url):
     try:
@@ -254,17 +143,19 @@ def scrape_url(url):
     except Exception as e:
         return None
 
-@app.route('/api/urls', methods=['POST'])
-@token_required
-def add_url(current_user):
+@app.route('/')
+def home():
+    return render_template('index.html')
+
+@app.route('/add_url', methods=['POST'])
+def add_url():
     if not es:
         return jsonify({"error": "Elasticsearch is not available"}), 503
 
-    data = request.get_json()
-    if not data or 'url' not in data:
-        return jsonify({"error": "URL is required"}), 400
+    url = request.form.get('url')
+    if not url:
+        return jsonify({"error": "No URL provided"}), 400
 
-    url = data['url']
     scraped_data = scrape_url(url)
     if not scraped_data:
         return jsonify({"error": "Failed to scrape URL"}), 400
@@ -275,77 +166,15 @@ def add_url(current_user):
             "title": scraped_data["title"],
             "content": scraped_data["content"],
             "favicon": scraped_data["favicon"],
-            "timestamp": datetime.utcnow().isoformat(),
-            "user_id": current_user['_id']
+            "timestamp": datetime.utcnow().isoformat()  # Add timestamp
         })
         return jsonify({"message": "URL added successfully"})
     except Exception as e:
-        logger.error(f"Error adding URL: {str(e)}")
-        return jsonify({"error": "Failed to store URL"}), 500
+        app.logger.error(f"Elasticsearch indexing error: {str(e)}")
+        return jsonify({"error": "Failed to store URL content"}), 500
 
-@app.route('/api/urls', methods=['GET'])
-@token_required
-def list_urls(current_user):
-    if not es:
-        return jsonify({"error": "Elasticsearch is not available"}), 503
-
-    try:
-        results = es.search(index="webpages", body={
-            "query": {
-                "term": {
-                    "user_id": current_user['_id']
-                }
-            },
-            "sort": [{"timestamp": {"order": "desc"}}],
-            "size": 100
-        })
-        
-        urls = [{
-            "url": hit["_source"]["url"],
-            "title": hit["_source"]["title"],
-            "favicon": hit["_source"].get("favicon"),
-            "timestamp": hit["_source"]["timestamp"]
-        } for hit in results["hits"]["hits"]]
-        
-        return jsonify(urls)
-    except Exception as e:
-        logger.error(f"Error listing URLs: {str(e)}")
-        return jsonify({"error": "Failed to list URLs"}), 500
-
-@app.route('/api/urls/<path:url>', methods=['DELETE'])
-@token_required
-def delete_url(current_user, url):
-    if not es:
-        return jsonify({"error": "Elasticsearch is not available"}), 503
-
-    try:
-        # Search for the URL belonging to the current user
-        result = es.search(index="webpages", body={
-            "query": {
-                "bool": {
-                    "must": [
-                        {"term": {"url": url}},
-                        {"term": {"user_id": current_user['_id']}}
-                    ]
-                }
-            }
-        })
-
-        if result["hits"]["total"]["value"] == 0:
-            return jsonify({"error": "URL not found"}), 404
-
-        # Delete the document
-        doc_id = result["hits"]["hits"][0]["_id"]
-        es.delete(index="webpages", id=doc_id)
-        
-        return jsonify({"message": "URL deleted successfully"})
-    except Exception as e:
-        logger.error(f"Error deleting URL: {str(e)}")
-        return jsonify({"error": "Failed to delete URL"}), 500
-
-@app.route('/api/search', methods=['GET'])
-@token_required
-def search(current_user):
+@app.route('/search', methods=['GET'])
+def search():
     if not es:
         return jsonify({"error": "Elasticsearch is not available"}), 503
 
@@ -357,35 +186,35 @@ def search(current_user):
         results = es.search(index="webpages", body={
             "query": {
                 "bool": {
-                    "must": [
-                        {"term": {"user_id": current_user['_id']}},
+                    "should": [
                         {
-                            "bool": {
-                                "should": [
-                                    {
-                                        "match": {
-                                            "title": {
-                                                "query": query,
-                                                "boost": 2.0,
-                                                "fuzziness": "AUTO",
-                                                "prefix_length": 2
-                                            }
-                                        }
-                                    },
-                                    {
-                                        "match": {
-                                            "content": {
-                                                "query": query,
-                                                "fuzziness": "AUTO",
-                                                "prefix_length": 2
-                                            }
-                                        }
-                                    }
-                                ],
-                                "minimum_should_match": 1
+                            "match": {
+                                "title": {
+                                    "query": query,
+                                    "boost": 2.0,
+                                    "fuzziness": "AUTO",
+                                    "prefix_length": 2
+                                }
+                            }
+                        },
+                        {
+                            "match": {
+                                "content": {
+                                    "query": query,
+                                    "fuzziness": "AUTO",
+                                    "prefix_length": 2
+                                }
+                            }
+                        },
+                        {
+                            "multi_match": {
+                                "query": query,
+                                "fields": ["title", "content"],
+                                "type": "phrase_prefix"
                             }
                         }
-                    ]
+                    ],
+                    "minimum_should_match": 1
                 }
             },
             "highlight": {
@@ -415,150 +244,79 @@ def search(current_user):
             "snippet": hit["highlight"]["content"][0] if "content" in hit.get("highlight", {}) else None
         } for hit in results["hits"]["hits"]])
     except Exception as e:
-        logger.error(f"Error searching URLs: {str(e)}")
+        app.logger.error(f"Elasticsearch search error: {str(e)}")
         return jsonify({"error": "Search failed"}), 500
 
-def get_url_content(url, user_id):
-    """Retrieve the content of a specific URL for a user"""
+@app.route('/urls', methods=['GET'])
+def list_urls():
     if not es:
-        return None
+        logger.error("Elasticsearch client is not initialized")
+        return jsonify({"error": "Elasticsearch is not available"}), 503
+
     try:
+        results = es.search(index="webpages", body={
+            "query": {"match_all": {}},
+            "sort": [{"timestamp": {"order": "desc"}}],  # Sort by timestamp
+            "size": 100  # Limit to latest 100 URLs
+        })
+        
+        urls = [{
+            "url": hit["_source"]["url"],
+            "title": hit["_source"]["title"],
+            "favicon": hit["_source"].get("favicon"),
+            "timestamp": hit["_source"]["timestamp"]
+        } for hit in results["hits"]["hits"]]
+        
+        logger.info(f"Successfully fetched {len(urls)} URLs")
+        return jsonify(urls)
+        
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Error fetching URLs: {error_msg}")
+        return jsonify({"error": f"Failed to fetch URLs: {error_msg}"}), 500
+
+@app.route('/url/<path:url>', methods=['DELETE'])
+def delete_url(url):
+    if not es:
+        return jsonify({"error": "Elasticsearch is not available"}), 503
+
+    try:
+        # Clean the URL (remove potential double encoding)
+        clean_url = url.strip()
+        
+        # Log the URL for debugging
+        logger.info(f"Attempting to delete URL: {clean_url}")
+
+        # Search for the exact URL
         result = es.search(index="webpages", body={
+            "size": 1,
             "query": {
                 "bool": {
                     "must": [
-                        {"term": {"url": url}},
-                        {"term": {"user_id": user_id}}
+                        {
+                            "term": {
+                                "url": clean_url
+                            }
+                        }
                     ]
                 }
             }
         })
-        if result["hits"]["total"]["value"] > 0:
-            return result["hits"]["hits"][0]["_source"]
-        return None
-    except Exception as e:
-        logger.error(f"Error retrieving URL content: {str(e)}")
-        return None
 
-def format_content_for_llm(content, query):
-    """Format the content for the LLM prompt"""
-    return f"""STRICT RESPONSE FORMAT:
+        # Check if URL was found
+        if result["hits"]["total"]["value"] == 0:
+            logger.warning(f"URL not found: {clean_url}")
+            return jsonify({"error": "URL not found"}), 404
 
-IF QUESTION IS UNRELATED:
-This webpage is about [topic]. Your question about [X] is unrelated to this content.
-
-IF INFORMATION IS INSUFFICIENT:
-This webpage covers [topic], but doesn't contain enough information about [X]. Consider:
-- Checking other sections of the website
-- Searching for [specific terms] online
-- Consulting [relevant sources]
-
-IF QUESTION CAN BE ANSWERED:
-[Direct answer in clear, numbered steps or concise paragraph]
-
-WEBPAGE CONTENT:
-Title: {content['title']}
-URL: {content['url']}
-Content: {content['content']}
-
-QUESTION: {query}
-
-REQUIREMENTS:
-1. Start response with exact answer
-2. No explanations of thinking
-3. No XML tags
-4. No blank lines
-5. No "I" statements
-6. No "Let me" phrases"""
-
-@app.route('/api/chat', methods=['POST'])
-@token_required
-def chat(current_user):
-    if not es:
-        return jsonify({"error": "Elasticsearch is not available"}), 503
-    
-    if not groq_client:
-        return jsonify({"error": "Groq API is not configured"}), 503
-
-    data = request.get_json()
-    if not data or 'url' not in data or 'query' not in data:
-        return jsonify({"error": "URL and query are required"}), 400
-
-    url = data['url']
-    query = data['query']
-
-    # Get the content for the URL
-    content = get_url_content(url, current_user['_id'])
-    if not content:
-        return jsonify({"error": "URL not found or not accessible"}), 404
-
-    try:
-        # Format the content for the LLM
-        prompt = format_content_for_llm(content, query)
+        # Delete the document
+        doc_id = result["hits"]["hits"][0]["_id"]
+        es.delete(index="webpages", id=doc_id)
         
-        # Get response from Groq
-        try:
-            response = groq_client.chat.completions.create(
-                model="qwen-qwq-32b",
-                messages=[
-                    {
-                        "role": "system", 
-                        "content": "You are a direct response system. Output only the final answer without any explanation, internal monologue, or XML tags. Never use <think> or similar tags."
-                    },
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.1,
-                max_tokens=1024
-            )
-
-            # Get the raw response
-            raw_response = response.choices[0].message.content.strip()
-            
-            # Clean up the response by removing internal monologue and XML tags
-            def clean_response(text):
-                # Remove <think> blocks
-                text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
-                # Remove any XML-like tags
-                text = re.sub(r'<[^>]+>', '', text)
-                # Remove phrases indicating thinking
-                text = re.sub(r'(?i)(let me|okay|first|looking|scanning|checking|i need to|i should)', '', text)
-                # Remove multiple newlines
-                text = re.sub(r'\n\s*\n', '\n', text)
-                # Remove leading/trailing whitespace
-                text = text.strip()
-                return text
-
-            cleaned_response = clean_response(raw_response)
-            
-            # If the cleaned response is empty, use a fallback
-            if not cleaned_response:
-                cleaned_response = "This webpage is about GroqCloud's features and API documentation. Your question appears to be unrelated to this content."
-
-            return jsonify({
-                "response": cleaned_response,
-                "url": url,
-                "title": content['title']
-            })
-        except Exception as groq_error:
-            logger.error(f"Groq API error: {str(groq_error)}")
-            if "rate limit" in str(groq_error).lower():
-                return jsonify({"error": "Rate limit exceeded. Please try again later."}), 429
-            elif "auth" in str(groq_error).lower():
-                return jsonify({"error": "Invalid Groq API key or authentication error"}), 401
-            elif "model" in str(groq_error).lower():
-                return jsonify({"error": "Model is currently unavailable. Please try again later."}), 503
-            else:
-                return jsonify({
-                    "error": "Failed to generate response",
-                    "details": str(groq_error)
-                }), 500
-
+        logger.info(f"Successfully deleted URL: {clean_url}")
+        return jsonify({"message": "URL deleted successfully"})
     except Exception as e:
-        logger.error(f"Error in chat endpoint: {str(e)}")
-        return jsonify({
-            "error": "Failed to process request",
-            "details": str(e)
-        }), 500
+        logger.error(f"Error deleting URL: {str(e)}")
+        return jsonify({"error": f"Failed to delete URL: {str(e)}"}), 500
 
 if __name__ == '__main__':
     if not es:
